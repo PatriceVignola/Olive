@@ -139,6 +139,31 @@ def text_encoder_data_loader(data_dir, batchsize, *args, **kwargs):
 
 
 # -----------------------------------------------------------------------------
+# TEXT ENCODER 2
+# -----------------------------------------------------------------------------
+
+
+def text_encoder_2_inputs(batchsize, torch_dtype):
+    return torch.zeros((batchsize, 77), dtype=torch_dtype)
+
+
+def text_encoder_2_load(model_name):
+    base_model_id = get_base_model_name(model_name)
+    model = CLIPTextModel.from_pretrained(base_model_id, subfolder="text_encoder")
+    if is_lora_model(model_name):
+        merge_lora_weights(model, model_name, "text_encoder")
+    return model
+
+
+def text_encoder_2_conversion_inputs(model):
+    return text_encoder_2_inputs(1, torch.int32)
+
+
+def text_encoder_2_data_loader(data_dir, batchsize, *args, **kwargs):
+    return RandomDataLoader(text_encoder_2_inputs, batchsize, torch.int32)
+
+
+# -----------------------------------------------------------------------------
 # UNET
 # -----------------------------------------------------------------------------
 
@@ -149,6 +174,31 @@ def unet_inputs(batchsize, torch_dtype, imagesize):
         "timestep": torch.rand((batchsize,), dtype=torch_dtype),
         "encoder_hidden_states": torch.rand((batchsize, 77, imagesize + 256), dtype=torch_dtype),
         "return_dict": False,
+    }
+
+
+def unet_xl_conversion_inputs(batchsize, torch_dtype, imagesize):
+    return {
+        "sample": torch.rand((batchsize, 4, 64, 64), dtype=torch_dtype),
+        "timestep": torch.rand((batchsize,), dtype=torch_dtype),
+        "encoder_hidden_states": torch.rand((batchsize, 77, imagesize * 2), dtype=torch_dtype),
+        "return_dict": False,
+        "optional_args": {
+            "added_cond_kwargs": {
+                "text_embeds": torch.rand((1, imagesize + 256), dtype=torch_dtype),
+                "time_ids": torch.rand((1, 6), dtype=torch_dtype),
+            }
+        },
+    }
+
+
+def unet_xl_evaluator_inputs(batchsize, torch_dtype, imagesize):
+    return {
+        "sample": torch.rand((batchsize, 4, 64, 64), dtype=torch_dtype),
+        "timestep": torch.rand((batchsize,), dtype=torch_dtype),
+        "encoder_hidden_states": torch.rand((batchsize, 77, imagesize * 2), dtype=torch_dtype),
+        "onnx::Concat_4": torch.rand((1, imagesize + 256), dtype=torch_dtype),
+        "onnx::Shape_5": torch.rand((1, 6), dtype=torch_dtype),
     }
 
 
@@ -168,12 +218,20 @@ def unet_conversion_inputs_768(model):
     return tuple(unet_inputs(1, torch.float32, 768).values())
 
 
+def unet_conversion_inputs_1024(model):
+    return tuple(unet_xl_conversion_inputs(1, torch.float32, 1024).values())
+
+
 def unet_data_loader_512(data_dir, batchsize, *args, **kwargs):
     return RandomDataLoaderImageSize(unet_inputs, batchsize, torch.float16, 512)
 
 
 def unet_data_loader_768(data_dir, batchsize, *args, **kwargs):
     return RandomDataLoaderImageSize(unet_inputs, batchsize, torch.float16, 768)
+
+
+def unet_data_loader_1024(data_dir, batchsize, *args, **kwargs):
+    return RandomDataLoaderImageSize(unet_xl_evaluator_inputs, batchsize, torch.float16, 1024)
 
 
 # -----------------------------------------------------------------------------
@@ -203,12 +261,20 @@ def vae_encoder_conversion_inputs_768(model):
     return tuple(vae_encoder_inputs(1, torch.float32, 768).values())
 
 
+def vae_encoder_conversion_inputs_1024(model):
+    return tuple(vae_encoder_inputs(1, torch.float32, 1024).values())
+
+
 def vae_encoder_data_loader_512(data_dir, batchsize, *args, **kwargs):
     return RandomDataLoaderImageSize(vae_encoder_inputs, batchsize, torch.float16, 512)
 
 
 def vae_encoder_data_loader_768(data_dir, batchsize, *args, **kwargs):
     return RandomDataLoaderImageSize(vae_encoder_inputs, batchsize, torch.float16, 768)
+
+
+def vae_encoder_data_loader_1024(data_dir, batchsize, *args, **kwargs):
+    return RandomDataLoaderImageSize(vae_encoder_inputs, batchsize, torch.float16, 1024)
 
 
 # -----------------------------------------------------------------------------

@@ -13,9 +13,10 @@ from pathlib import Path
 
 import onnxruntime as ort
 import torch
-from diffusers import OnnxRuntimeModel, OnnxStableDiffusionPipeline, StableDiffusionPipeline
+from diffusers import OnnxRuntimeModel, OnnxStableDiffusionPipeline, StableDiffusionPipeline, StableDiffusionXLPipeline
 from packaging import version
 from PIL import Image, ImageTk
+from pipeline_onnx_stable_diffusion_xl import OnnxStableDiffusionXLPipeline
 from user_script import get_base_model_name
 
 from olive.model import ONNXModel
@@ -130,7 +131,15 @@ def run_inference_gui(pipeline, prompt, num_images, batch_size, image_size, num_
 
 
 def run_inference(
-    optimized_model_dir, prompt, num_images, batch_size, image_size, num_inference_steps, static_dims, interactive
+    optimized_model_dir,
+    prompt,
+    num_images,
+    batch_size,
+    image_size,
+    num_inference_steps,
+    static_dims,
+    interactive,
+    is_xl_model,
 ):
     ort.set_default_logger_severity(3)
 
@@ -150,9 +159,14 @@ def run_inference(
         sess_options.add_free_dimension_override_by_name("unet_hidden_batch", batch_size * 2)
         sess_options.add_free_dimension_override_by_name("unet_hidden_sequence", 77)
 
-    pipeline = OnnxStableDiffusionPipeline.from_pretrained(
-        optimized_model_dir, provider="DmlExecutionProvider", sess_options=sess_options
-    )
+    if is_xl_model:
+        pipeline = OnnxStableDiffusionXLPipeline.from_pretrained(
+            optimized_model_dir, provider="DmlExecutionProvider", sess_options=sess_options
+        )
+    else:
+        pipeline = OnnxStableDiffusionPipeline.from_pretrained(
+            optimized_model_dir, provider="DmlExecutionProvider", sess_options=sess_options
+        )
 
     if interactive:
         run_inference_gui(pipeline, prompt, num_images, batch_size, image_size, num_inference_steps)
@@ -189,18 +203,25 @@ def optimize(
     # This avoids an issue where the non-ONNX components (tokenizer, scheduler, and feature extractor) are not
     # automatically cached correctly if individual models are fetched one at a time.
     print("Download stable diffusion PyTorch pipeline...")
-    pipeline = StableDiffusionPipeline.from_pretrained(base_model_id, torch_dtype=torch.float32)
+
+    if base_model_id == "stabilityai/stable-diffusion-xl-base-0.9":
+        pipeline = StableDiffusionXLPipeline.from_pretrained(base_model_id, torch_dtype=torch.float32)
+    else:
+        pipeline = StableDiffusionPipeline.from_pretrained(base_model_id, torch_dtype=torch.float32)
 
     model_info = dict()
 
-    models_without_safety_checker = [
-        "stabilityai/stable-diffusion-2",
-    ]
-
     submodel_names = ["text_encoder", "vae_encoder", "vae_decoder", "unet"]
 
-    if model_id not in models_without_safety_checker:
+    has_safety_checker = hasattr(pipeline, "safety_checker")
+
+    # Not all models have a safety checker
+    if has_safety_checker:
         submodel_names.append("safety_checker")
+
+    # The XL models have 2 text encoders
+    if hasattr(pipeline, "text_encoder_2"):
+        submodel_names.append("text_encoder_2")
 
     for submodel_name in submodel_names:
         print(f"\nOptimizing {submodel_name}")
@@ -262,22 +283,31 @@ def optimize(
     # This is optional, and the optimized models can be used directly in a custom pipeline if desired.
     print("\nCreating ONNX pipeline...")
 
-    safety_checker = None
-
-    if model_id not in models_without_safety_checker:
-        safety_checker = OnnxRuntimeModel.from_pretrained(model_info["safety_checker"]["unoptimized"]["path"].parent)
-
-    onnx_pipeline = OnnxStableDiffusionPipeline(
-        vae_encoder=OnnxRuntimeModel.from_pretrained(model_info["vae_encoder"]["unoptimized"]["path"].parent),
-        vae_decoder=OnnxRuntimeModel.from_pretrained(model_info["vae_decoder"]["unoptimized"]["path"].parent),
-        text_encoder=OnnxRuntimeModel.from_pretrained(model_info["text_encoder"]["unoptimized"]["path"].parent),
-        tokenizer=pipeline.tokenizer,
-        unet=OnnxRuntimeModel.from_pretrained(model_info["unet"]["unoptimized"]["path"].parent),
-        scheduler=pipeline.scheduler,
-        safety_checker=safety_checker,
-        feature_extractor=pipeline.feature_extractor,
-        requires_safety_checker=True,
-    )
+    if hasattr(pipeline, "tokenizer_2"):
+        onnx_pipeline = OnnxStableDiffusionXLPipeline(
+            vae_encoder=OnnxRuntimeModel.from_pretrained(model_info["vae_encoder"]["unoptimized"]["path"].parent),
+            vae_decoder=OnnxRuntimeModel.from_pretrained(model_info["vae_decoder"]["unoptimized"]["path"].parent),
+            text_encoder=OnnxRuntimeModel.from_pretrained(model_info["text_encoder"]["unoptimized"]["path"].parent),
+            text_encoder_2=OnnxRuntimeModel.from_pretrained(model_info["text_encoder_2"]["unoptimized"]["path"].parent),
+            tokenizer=pipeline.tokenizer,
+            tokenizer_2=pipeline.tokenizer_2,
+            unet=OnnxRuntimeModel.from_pretrained(model_info["unet"]["unoptimized"]["path"].parent),
+            scheduler=pipeline.scheduler,
+        )
+    else:
+        onnx_pipeline = OnnxStableDiffusionPipeline(
+            vae_encoder=OnnxRuntimeModel.from_pretrained(model_info["vae_encoder"]["unoptimized"]["path"].parent),
+            vae_decoder=OnnxRuntimeModel.from_pretrained(model_info["vae_decoder"]["unoptimized"]["path"].parent),
+            text_encoder=OnnxRuntimeModel.from_pretrained(model_info["text_encoder"]["unoptimized"]["path"].parent),
+            tokenizer=pipeline.tokenizer,
+            unet=OnnxRuntimeModel.from_pretrained(model_info["unet"]["unoptimized"]["path"].parent),
+            scheduler=pipeline.scheduler,
+            safety_checker=OnnxRuntimeModel.from_pretrained(model_info["safety_checker"]["unoptimized"]["path"].parent)
+            if has_safety_checker
+            else None,
+            feature_extractor=pipeline.feature_extractor,
+            requires_safety_checker=True,
+        )
 
     print("Saving unoptimized models...")
     onnx_pipeline.save_pretrained(unoptimized_model_dir)
@@ -290,6 +320,10 @@ def optimize(
         dst_path = optimized_model_dir / submodel_name / "model.onnx"
         shutil.copyfile(src_path, dst_path)
 
+        # The XL unet models are too large and have their weights in a separate .onnx.data file
+        if src_path.with_suffix(".onnx.data").exists():
+            shutil.copyfile(src_path.with_suffix(".onnx.data"), dst_path.with_suffix(".onnx.data"))
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -301,6 +335,7 @@ if __name__ == "__main__":
             "runwayml/stable-diffusion-v1-5",
             "sayakpaul/sd-model-finetuned-lora-t4",
             "stabilityai/stable-diffusion-2",
+            "stabilityai/stable-diffusion-xl-base-0.9",
         ),
     )
     parser.add_argument("--interactive", action="store_true", help="Run with a GUI")
@@ -343,7 +378,10 @@ if __name__ == "__main__":
     if args.clean_cache:
         shutil.rmtree(script_dir / "cache", ignore_errors=True)
 
-    image_size = 768 if args.model_id == "stabilityai/stable-diffusion-2" else 512
+    image_size = {
+        "stabilityai/stable-diffusion-2": 768,
+        "stabilityai/stable-diffusion-xl-base-0.9": 1024,
+    }.get(args.model_id, 512)
 
     if args.optimize or not optimized_model_dir.exists():
         # TODO: clean up warning filter (mostly during conversion from torch to ONNX)
@@ -354,6 +392,8 @@ if __name__ == "__main__":
     if not args.optimize:
         model_dir = unoptimized_model_dir if args.test_unoptimized else optimized_model_dir
         use_static_dims = not args.dynamic_dims
+
+        is_xl_model = args.model_id == "stabilityai/stable-diffusion-xl-base-0.9"
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -366,4 +406,5 @@ if __name__ == "__main__":
                 args.num_inference_steps,
                 use_static_dims,
                 args.interactive,
+                is_xl_model,
             )
